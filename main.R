@@ -1,3 +1,5 @@
+# main.R
+# Runs NaiveBayes on 20 newsgroup data
 library(tm)
 library(tm.plugin.mail)
 library(Snowball)
@@ -8,6 +10,12 @@ library(FSelector)
 options(width=140)
 
 prepCorpus <- function(dirname) {
+  # Reads in a newsgroup directory, cleans the data, loads it into a Corpus
+  #
+  # Args:
+  #   dirname: Directory name (string)
+  # Returns:
+  #   The Corpus
   removeStopWords <- function (doc) {
     return(removeWords(doc, stopwords("english")))
   }
@@ -28,10 +36,19 @@ prepCorpus <- function(dirname) {
   data <- tm_map(data, removeNumbers)
   data <- tm_map(data, removePunctuation)
   data <- tm_map(data, stemDoc)
+  names(data) <- dirname
   return(data)
 }
 
 kFoldIndices <- function(Nobs,K=5) {
+  # Computes array indices that can be used for k-fold cross validation
+  #
+  # Args:
+  #  Nobs: Number of rows in the array
+  #  K: Number of folds
+  #
+  # Returns:
+  #  A list of k elements, each of which has a $train and a $test component.
   rs <- runif(Nobs)
   id <- seq(Nobs)[order(rs)]
   k <- as.integer(Nobs*seq(1,K-1)/K)
@@ -43,38 +60,12 @@ kFoldIndices <- function(Nobs,K=5) {
   return(l)
 }
 
-createMainDocumentTermMatrix <- function (data, attributes) {
-  l = list()
-  li = 1
-  classColumn = vector(mode="character", length=0)
+selectDtmColumns <- function (dtm, filterFn) {
+  return (dtm[,!(sapply(dimnames(dtm)$Terms, filterFn))])
+}
 
-  for (i in 1:length(data)) {
-    classColumn = c(classColumn, rep(names(data)[i], dim(data[[i]])[1]))
-  }
-
-  l[[li]] = as.factor(classColumn)
-  li = li + 1
-
-  for (i in 1:length(attributes)) {
-    attributeVector = vector(mode="numeric", length=0)
-    for (j in 1:length(data)) {
-      attribute = attributes[i]
-      dtm = as.matrix(data[[j]])
-      rowTerms = dimnames(dtm)[[2]]
-      if (attribute %in% rowTerms) {
-        attributeVector = c(attributeVector, dtm[,attribute])
-      } else {
-        attributeVector = c(attributeVector, rep(0, dim(dtm)[1]))
-      }
-    }
-    l[[li]] = attributeVector
-    li = li + 1
-  }
-
-  df = do.call(cbind.data.frame, l)
-  names(df) = c("class", attributes)
-
-  return(df)
+selectDfColumns <- function (df, filterFn) {
+  return (df[,!(sapply(dimnames(df)[[2]], filterFn))])
 }
 
 createDocumentTermMatrix <- function (corpus, maxAllowedSparseness) {
@@ -89,66 +80,199 @@ err <- function (y.true, y.pred) {
 }
 
 prepCorpora <- function (dirs) {
+  # Runs prepCorpus for each of the directory names in dirs
+  #
+  # Args:
+  #   dirs: list of directory names
+  #
+  # Returns:
+  #   The list of Corpora
   corpora <- lapply(dirs, function (dirName) {
     return(prepCorpus(dirName))
   })
-  names(corpora) <- dirs
+  names(corpora) = dirs
   return(corpora)
 }
 
-prepData <- function (corpora, maxAllowedSparseness) {
+createDtm <- function (corpus, maxSparseness) {
+  m = createDocumentTermMatrix(corpus, maxSparseness)
+  rownames(m) = rep(names(corpus)[1], dim(m)[1])
+  return(m)
+}
+
+createDtms <- function (corpora, maxAllowedSparseness) {
   data <- lapply(corpora, function (corpus) {
-    return(createDocumentTermMatrix(corpus, maxAllowedSparseness))
+    return (createDtm(corpus, maxAllowedSparseness))
   })
-  names(data) <- names(corpora)
+  names(data) = names(corpora)
 
   return(data)
 }
 
-getAttributes <- function (data) {
-  attributes <- unique(unlist(lapply(data, function (dtm) {
-    return(dimnames(dtm)[[2]])
-  })))
-  names(attributes) <- c()
-  return(attributes)
+createMainDtm <- function(corpora, sparsenessThreshold) {
+  dtms = createDtms(corpora, sparsenessThreshold)
+  # merge dtms
+  dtm = do.call(c, dtms)
+  return (dtm)
 }
 
-createMainDTM <- function(corpora, threshold) {
-  print(paste("Running threshold: ", threshold))
-  dtms <- prepData(corpora, threshold)
-  attributes <- getAttributes(dtms)
-  print(paste("Attribute count: ", length(attributes)))
-  print(paste("Attributes: ", attributes))
+runNaiveBayes <- function (corpora,
+                           sparsenessThreshold,
+                           attributeSelectionFn,
+                           k) {
+  # attribute selection
+  dtm <- createMainDtm(corpora, sparsenessThreshold)
+  df <- dataFrameFromDocumentTermMatrix(dtm)
+  attributes <- attributeSelectionFn(df)
 
-  df = createMainDocumentTermMatrix(dtms, attributes)
+  # filter out terms which did not get to be attributes
+  df <- selectDfColumns(df, function (colname) { colname %in% attributes })
+
+  folds <- kFoldIndices(dim(df)[1], k)
+  measures <- sapply(folds, function (fold) {
+    return (computeClassificationMeasures(df, fold))
+  })
+  # add means column to the results
+  measures = data.frame(means=rowMeans(apply(measures, 2, as.numeric)), measures)
+
+  return (measures)
+}
+
+# Ref: http://rali.iro.umontreal.ca/rali/sites/default/files/publis/SokolovaLapalme-JIPM09.pdf
+computeClassificationMeasures <- function (df, fold) {
+  train <- df[fold$train,]
+  test <- df[fold$test,]
+  model <- naiveBayes(class ~ ., data=train, laplace = laplace)
+
+  predictions <- predict(model, test[, -1])
+  allClasses <- levels(test$class)
+  tp <- tn <- fn <- fp <- c()
+  allTp <- allTn <- allFn <- allFp <- c()
+  accuracy <- errorRate <- precision <- recall <- c()
+  for (class in allClasses) {
+    # select predictions corresponding to test rows with class 'class'
+    classPredictions <- predictions[test[, 1] == class]
+    # predictions corresponding to test rows with other classes
+    otherPredictions <- predictions[test[, 1] != class]
+    allTp[[class]] <- tp <- sum(classPredictions == class)
+    allTn[[class]] <- tn <- sum(otherPredictions != class)
+    allFn[[class]] <- fn <- sum(classPredictions != class)
+    allFp[[class]] <- fp <- sum(otherPredictions == class)
+
+
+    accuracy[[class]] <- (tp + tn) / (tp + fn + fp + tn)
+    errorRate[[class]] <- (fp + fn) / (tp + fn + fp + tn)
+
+    precision[[class]] <- tp / ( tp + fp )
+    recall[[class]] <- tp / (tp + fn)
+
+  }
+  l <- length(allClasses)
+  measures <- c()
+
+  # The average per-class effectiveness of a classiﬁer
+  measures$avgAccuracy <- sum(accuracy) / l
+  # The average per-class classiﬁcation error
+  measures$avgError <- sum(errorRate) / l
+
+  # Agreement of the data class labels with those of a classiﬁers if calculated from sums of per-text decisions
+  # measures$avgPrecision <- sum(allTp) / sum(allTp) + sum(allFp) # micro
+  # Effectiveness of a classiﬁer to identify class labels if calculated from sums of per-text decisions
+  # measures$avgRecall <- sum(allTp) / sum(allTp) + sum(allFp) # micro
+
+  # An average per-class agreement of the data class labels with those of a classiﬁers
+  avgPrecision <- measures$avgPrecision <- sum(precision) / l
+
+  # An average per-class effectiveness of a classiﬁer to identify class labels
+  avgRecall <- measures$avgRecall <- sum(recall) / l
+
+  measures$avgFscore <- 2 * avgPrecision * avgRecall / ( avgPrecision + avgRecall )
+  measures$oldError <- err(test$class, predict(model, test[,-1]))
+
+  return(measures)
+}
+
+meanClassificationError <- function (corpora,
+                                     sparsenessThreshold,
+                                     attributeSelectionFn,
+                                     k) {
+  # attribute selection
+  dtm <- createMainDtm(corpora, sparsenessThreshold)
+  df <- dataFrameFromDocumentTermMatrix(dtm)
+  attributes <- attributeSelectionFn(df)
+
+  # filter out terms which did not get to be attributes
+  df <- selectDfColumns(df, function (colname) { colname %in% attributes })
+
+  folds <- kFoldIndices(dim(df)[1], k)
+  errors <- unlist(lapply(folds, function (fold) {
+    return (naiveBayesErrorOnFold(df, fold))
+  }))
+  # print(paste(k, "-fold cross validation mean error: ", mean(errors)))
+  return (mean(errors))
+}
+
+naiveBayesErrorOnFold <- function (df, fold) {
+  train <- df[fold$train,]
+  test <- df[fold$test,]
+  model <- naiveBayes(class ~ ., data=train, laplace = laplace)
+  return(err(test$class, predict(model, test[,-1])))
+}
+
+dataFrameFromDocumentTermMatrix <- function (dtm) {
+  class <- rownames(dtm)
+  rownames(dtm) <- c()
+  df <- as.data.frame(as.matrix(dtm))
+  df <- cbind.data.frame(class, df)
   return(df)
 }
 
-meanClassificationError <- function (corpora, threshold, k) {
-  df = createMainDTM(corpora, threshold)
+selectAttributesChiSquared <- function (df, cutoff) {
+  lst <- chi.squared(df)
+  # sort by attr_importance, keep rownames
+  sorted <- lst[order(lst[,"attr_importance"]), , drop=FALSE]
+  # keep only those bigger than cutoff
+  attrs <- sorted[sorted$attr_importance > cutoff, , drop=FALSE]
+  return(rownames(attrs))
+}
 
-  k = 2
-  folds = kFoldIndices(dim(df)[1], k)
-  errors = unlist(lapply(folds, function (fold) {
-    train = df[fold$train,]
-    test = df[fold$test,]
-    model <- naiveBayes(class ~ ., data=train, laplace = laplace)
-    return(err(test$class, predict(model, test[,-1])))
-  }))
-  print(paste(k, "-fold cross validation mean error: ", mean(errors)))
-  return (mean(errors))
+testChiSquaredAttributeSelection <- function (corpora) {
+  chiSquaredCutOffs <- c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6)
+  sparsenessThreshold <- 0.8
+
+  measureMeans <- lapply(chiSquaredCutOffs, function (cutoff) {
+    attributeSelectionFn <- function (df) {
+      return (selectAttributesChiSquared(df, cutoff))
+    }
+
+    results <- runNaiveBayes(corpora, 0.8, attributeSelectionFn, 3)
+    data <- cbind.data.frame(chiSquaredCutOff=cutoff, results[1])
+    return(data)
+  })
+
+  results <- do.call(data.frame.rbind(measureMeans))
+  return (results)
 }
 
 
 
 # dirs <- c('alt.atheism', 'comp.graphics', 'comp.os.ms-windows.misc', 'comp.sys.ibm.pc.hardware', 'comp.sys.mac.hardware', 'comp.windows.x', 'misc.forsale', 'rec.autos', 'rec.motorcycles', 'rec.sport.baseball', 'rec.sport.hockey', 'sci.crypt', 'sci.electronics', 'sci.med', 'sci.space', 'soc.religion.christian', 'talk.politics.guns', 'talk.politics.mideast', 'talk.politics.misc', 'talk.religion.misc')
-dirs <- c('alt.atheism', 'comp.graphics', 'talk.politics.guns')
+dirs <- c('alt.atheism', 'comp.graphics')
 
-m = createMainDTM(corpora, 0.8)
+corpora <- prepCorpora(dirs)
+results <- testChiSquaredAttributeSelection(corpora)
+## attributeSelectionFn = function (df) {
+##   return (selectAttributesChiSquared(df, chiSquaredCutOff))
+## }
+# results <- runNaiveBayes(corpora, 0.8, attributeSelectionFn, 3)
+# results <-  testChiSquaredAttributeSelection(corpora)
+# sparsenessThreshold = 0.8
+# chiSquaredCutOff = 0.3
+# attributeSelectionFn = function (df) {
+#   return (selectAttributesChiSquared(df, chiSquaredCutOff))
+# }
+# error <- meanClassificationError(corpora, sparsenessThreshold, attributeSelectionFn, 3)
 
-# dirs <- c('alt.atheism', 'comp.graphics')
-
-# corpora <- prepCorpora(dirs)
 # maxSparsenessThresholds <- list(0.7, 0.6, 0.5, 0.4)
 # meanClassificationError(corpora, 0.7, 2)
 # results = lapply(maxSparsenessThresholds, function(threshold) {

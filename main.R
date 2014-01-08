@@ -128,14 +128,28 @@ runNaiveBayes <- function (corpora,
   # filter out terms which did not get to be attributes
   df <- selectDfColumns(df, function (colname) { colname %in% attributes })
 
+  print(dim(df))
   folds <- kFoldIndices(dim(df)[1], k)
   measures <- sapply(folds, function (fold) {
     return (computeClassificationMeasures(df, fold))
   })
   # add means column to the results
-  measures = data.frame(means=rowMeans(apply(measures, 2, as.numeric)), measures)
+  measures <- data.frame(means=rowMeans(apply(measures, 2, as.numeric)), measures)
 
-  return (measures)
+  # return only means over folds
+  means <- t(measures[1])
+
+  # add attribute count
+  attributeString <- paste(attributes, collapse='|')
+  measuresWithAttrInfo <- cbind(means,
+                                attr_count=as.numeric(length(attributes)),
+                                attrs=attributeString
+                                )
+
+  # remove rownames
+  rownames(measuresWithAttrInfo) <- c()
+
+  return (measuresWithAttrInfo)
 }
 
 # Ref: http://rali.iro.umontreal.ca/rali/sites/default/files/publis/SokolovaLapalme-JIPM09.pdf
@@ -246,18 +260,20 @@ testChiSquaredAttributeSelection <- function (corpora) {
     }
 
     results <- runNaiveBayes(corpora, 0.8, attributeSelectionFn, 3)
-    data <- cbind.data.frame(chiSquaredCutOff=cutoff, results[1])
+    data <- cbind.data.frame(chiSquaredCutOff=cutoff, results)
+    rownames(data) <- c()
     return(data)
   })
 
-  results <- do.call(data.frame.rbind(measureMeans))
+  results <- do.call(rbind, measureMeans)
   return (results)
 }
 
 
 
 # dirs <- c('alt.atheism', 'comp.graphics', 'comp.os.ms-windows.misc', 'comp.sys.ibm.pc.hardware', 'comp.sys.mac.hardware', 'comp.windows.x', 'misc.forsale', 'rec.autos', 'rec.motorcycles', 'rec.sport.baseball', 'rec.sport.hockey', 'sci.crypt', 'sci.electronics', 'sci.med', 'sci.space', 'soc.religion.christian', 'talk.politics.guns', 'talk.politics.mideast', 'talk.politics.misc', 'talk.religion.misc')
-dirs <- c('alt.atheism', 'comp.graphics')
+dirs <- c('alt.atheism', 'comp.graphics', 'comp.os.ms-windows.misc', 'comp.sys.ibm.pc.hardware', 'comp.sys.mac.hardware', 'comp.windows.x', 'misc.forsale', 'rec.autos', 'rec.motorcycles', 'rec.sport.baseball', 'rec.sport.hockey')
+# dirs <- c('alt.atheism', 'comp.graphics')
 
 corpora <- prepCorpora(dirs)
 results <- testChiSquaredAttributeSelection(corpora)

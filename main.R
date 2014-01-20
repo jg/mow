@@ -150,7 +150,7 @@ computePerformanceMeasuresForAlgorithm <- function (corpora,
   # attribute selection
   dtm <- createMainDtm(corpora, sparsenessThreshold)
   df <- dataFrameFromDocumentTermMatrix(dtm)
-  attributes <- attributeSelectionFn(df)
+  attributes <- attributeSelectionFn(dtm)
 
   # select only columns which got to be attributes
   df <- df[,c("class", attributes)]
@@ -251,10 +251,11 @@ dataFrameFromDocumentTermMatrix <- function (dtm) {
   return(df)
 }
 
-selectAttributesChiSquared <- function (df, cutoff) {
+selectAttributesChiSquared <- function (dtm, cutoff) {
+  df <- dataFrameFromDocumentTermMatrix(dtm)
+
   # Select most relevant attributes from DataFrame given a cutoff
   lst <- chi.squared(df)
-  print(paste("lst.size = ", dim(lst)))
   # sort by attr_importance, keep rownames
   sorted <- lst[order(lst[,"attr_importance"]), , drop=FALSE]
   # keep only those bigger than cutoff
@@ -262,8 +263,13 @@ selectAttributesChiSquared <- function (df, cutoff) {
   return(rownames(attrs))
 }
 
+selectAttributesByFrequency <- function (dtm, lowerFreqBound) {
+  return (findFreqTerms(dtm, lowfreq = lowerFreqBound))
+}
+
+
 testChiSquaredAttributeSelection <- function (corpora, algorithm) {
-  chiSquaredCutOffs <- c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6)
+  chiSquaredCutOffs <- c(0)
   sparsenessThreshold <- 0.8
 
   measureMeans <- lapply(chiSquaredCutOffs, function (cutoff) {
@@ -286,12 +292,47 @@ testChiSquaredAttributeSelection <- function (corpora, algorithm) {
   return (results)
 }
 
+testFrequencyAttributeSelection <- function (corpora, algorithm) {
+  freqs <- c(100, 200, 300, 400, 500, 600, 700, 800, 900, 1000)
+  sparsenessThreshold <- 0.8
 
-dirs <- c('alt.atheism', 'comp.graphics', 'comp.os.ms-windows.misc', 'comp.sys.ibm.pc.hardware', 'comp.sys.mac.hardware', 'comp.windows.x', 'misc.forsale', 'rec.autos', 'rec.motorcycles', 'rec.sport.baseball', 'rec.sport.hockey', 'sci.crypt', 'sci.electronics', 'sci.med', 'sci.space', 'soc.religion.christian', 'talk.politics.guns', 'talk.politics.mideast', 'talk.politics.misc', 'talk.religion.misc')
+  measureMeans <- lapply(freqs, function (freqBound) {
+    print(paste("freqBound = ", freqBound))
+    attributeSelectionFn <- function (dtm) {
+      return (selectAttributesByFrequency(dtm, freqBound))
+    }
+
+    results <- computePerformanceMeasuresForAlgorithm(corpora,
+                                                      algorithm,
+                                                      0.8,
+                                                      attributeSelectionFn,
+                                                      3)
+    data <- cbind.data.frame(frequencyLBound=freqBound, results)
+    rownames(data) <- c()
+    return(data)
+  })
+
+  results <- do.call(rbind, measureMeans)
+  return (results)
+}
+
+
+Alldirs <- c('alt.atheism', 'comp.graphics', 'comp.os.ms-windows.misc', 'comp.sys.ibm.pc.hardware', 'comp.sys.mac.hardware', 'comp.windows.x', 'misc.forsale', 'rec.autos', 'rec.motorcycles', 'rec.sport.baseball', 'rec.sport.hockey', 'sci.crypt', 'sci.electronics', 'sci.med', 'sci.space', 'soc.religion.christian', 'talk.politics.guns', 'talk.politics.mideast', 'talk.politics.misc', 'talk.religion.misc')
+dirs <- sample(Alldirs, 2)
+dirs <- Alldirs
 # dirs <- c('misc.forsale', 'rec.autos', 'rec.motorcycles', 'rec.sport.baseball', 'rec.sport.hockey')
-# dirs <- c('alt.atheism', 'comp.graphics')
 
 corpora <- prepCorpora(dirs)
+
+## naiveBayesAlgorithm <- function (trainingSet) {
+##   return (naiveBayes(class ~ ., data=trainingSet, laplace = laplace))
+## }
+## resultsNB <- testFrequencyAttributeSelection(corpora, naiveBayesAlgorithm)
+
+## SVMAlgorithm <- function (trainingSet) {
+##   return (svm(class ~ ., data=trainingSet, laplace = laplace))
+## }
+## resultsSVM <- testFrequencyAttributeSelection(corpora, SVMAlgorithm)
 
 naiveBayesAlgorithm <- function (trainingSet) {
   return (naiveBayes(class ~ ., data=trainingSet, laplace = laplace))
